@@ -1,0 +1,228 @@
+---
+title: "Picrust_7/28/2025"
+author: "Benjamin Marks"
+date: "2025-07-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{R}
+
+
+# Load libraries
+library(tidyverse)
+library(pheatmap)
+library(ggpubr)
+
+
+# Load and clean column names
+pathways <- read_tsv("~/Downloads/PipelineResults_c8e5bc14832f/pathways_out/path_abun_unstrat_descrip.tsv") %>%
+  rename_with(.cols = -c(pathway, description),
+              .fn = ~ str_remove(., "^UniqueID"))
+
+
+# Load metadata
+# Replace with your actual file path
+metadata <- meta  # must include SampleID, ParasiteGroup
+
+# Correct sample ID check
+all(colnames(pathways)[-c(1,2)] %in% metadata$SampleID)
+
+
+# Copy and normalize only sample columns (assumes first 2 are pathway + description)
+pathways_rel <- pathways
+
+# Convert sample columns to numeric just in case
+pathways_rel[ , -c(1,2)] <- pathways_rel[ , -c(1,2)] %>%
+  mutate(across(everything(), as.numeric))
+
+# Normalize each column to relative abundance
+pathways_rel[ , -c(1,2)] <- sweep(pathways_rel[ , -c(1,2)], 2, colSums(pathways_rel[ , -c(1,2)]), FUN = "/")
+
+
+# Pivot longer only sample columns (assumes pathway and description are the first 2)
+pathways_long <- pathways_rel %>%
+  pivot_longer(
+    cols = -c(pathway, description),  # exclude non-sample columns
+    names_to = "SampleID",
+    values_to = "RelAbundance"
+  )
+
+
+# Identify top 10 most abundant pathways across all samples
+top_pathways <- pathways_long %>%
+  group_by(pathway) %>%
+  summarize(mean_abund = mean(RelAbundance)) %>%
+  slice_max(mean_abund, n = 10)
+
+# Filter data for top pathways
+top_plot_data <- pathways_long %>%
+  filter(pathway %in% top_pathways$pathway)
+
+
+# Join pathway abundance data with metadata by SampleID
+top_plot_data <- top_plot_data %>%
+  left_join(metadata, by = "SampleID")
+
+
+
+ggplot(top_plot_data, aes(x = EH_GL_C, y = RelAbundance, fill = EH_GL_C)) +
+  geom_boxplot() +
+  facet_wrap(~ pathway, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Top 10 MetaCyc Pathways by Parasite Group",
+       x = "EH_GL_C", y = "Relative Abundance") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  stat_compare_means(aes(group = EH_GL_C), method = "wilcox.test", label = "p.format")
+
+
+# Generate heatmap of mean pathway abundance by ParasiteGroup
+heatmap_data <- pathway_long_rel %>%
+  group_by(pathway, ParasiteGroup) %>%
+  summarize(mean_abund = mean(RelAbundance), .groups = 'drop') %>%
+  pivot_wider(names_from = ParasiteGroup, values_from = mean_abund)
+
+heatmap_mat <- as.data.frame(heatmap_data)
+rownames(heatmap_mat) <- heatmap_mat$pathway
+heatmap_mat <- heatmap_mat[,-1]
+
+# Plot heatmap
+pheatmap(scale(heatmap_mat),
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         main = "Pathway Heatmap by Parasite Group")
+
+# Kruskal-Wallis test for pathway differences
+kruskal_results <- pathway_long_rel %>%
+  group_by(pathway) %>%
+  summarize(p_value = kruskal.test(RelAbundance ~ ParasiteGroup)$p.value) %>%
+  mutate(FDR = p.adjust(p_value, method = "fdr")) %>%
+  arrange(FDR)
+
+# Show significant pathways (adjust threshold if needed)
+sig_pathways <- kruskal_results %>%
+  filter(FDR < 0.05)
+
+print("Significantly different pathways (FDR < 0.05):")
+print(sig_pathways)
+
+
+```
+
+```{R}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Load libraries
+library(tidyverse)
+library(ggpubr)
+library(pheatmap)
+
+# Load and clean column names from PICRUSt2
+pathways <- read_tsv("~/Downloads/PipelineResults_c8e5bc14832f/pathways_out/path_abun_unstrat_descrip.tsv") %>%
+  rename_with(.cols = -c(pathway, description),
+              .fn = ~ str_remove(., "^UniqueID"))
+
+# Load metadata (must include SampleID and parasite group columns)
+metadata <- meta  # assume already loaded with SampleID, EH_GL_C, etc.
+
+# Check if sample IDs match
+stopifnot(all(colnames(pathways)[-c(1,2)] %in% metadata$SampleID))
+
+# Normalize to relative abundance
+pathways_rel <- pathways
+pathways_rel[ , -c(1,2)] <- pathways_rel[ , -c(1,2)] %>%
+  mutate(across(everything(), as.numeric))
+pathways_rel[ , -c(1,2)] <- sweep(pathways_rel[ , -c(1,2)],
+                                  2, colSums(pathways_rel[ , -c(1,2)]), FUN = "/")
+
+# Pivot to long format
+pathways_long <- pathways_rel %>%
+  pivot_longer(cols = -c(pathway, description),
+               names_to = "SampleID",
+               values_to = "RelAbundance")
+
+# Merge with metadata
+pathways_long <- pathways_long %>%
+  left_join(metadata, by = "SampleID")
+
+# Identify top 10 most variable pathways
+top_pathways <- pathways_long %>%
+  group_by(pathway) %>%
+  summarize(sd_abund = sd(RelAbundance), .groups = "drop") %>%
+  slice_max(sd_abund, n = 10)
+
+# Filter data for those pathways
+top_plot_data <- pathways_long %>%
+  filter(pathway %in% top_pathways$pathway)
+
+# Boxplot with p-values by infection group (change 'EH_GL_C' if needed)
+ggplot(top_plot_data, aes(x = ANY, y = RelAbundance, fill = ANY)) +
+  geom_boxplot() +
+  facet_wrap(~ pathway, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Top 10 Most Variable MetaCyc Pathways by Parasite Group",
+       x = "Parasite Group (ANY)", y = "Relative Abundance") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  stat_compare_means(aes(group = ANY), method = "wilcox.test", label = "p.format")
+
+# Heatmap: mean abundance by ParasiteGroup
+heatmap_data <- pathways_long %>%
+  group_by(pathway, ParasiteGroup) %>%
+  summarize(mean_abund = mean(RelAbundance), .groups = "drop") %>%
+  pivot_wider(names_from = ParasiteGroup, values_from = mean_abund)
+
+# Prepare matrix for heatmap
+heatmap_mat <- as.data.frame(heatmap_data)
+rownames(heatmap_mat) <- heatmap_mat$pathway
+heatmap_mat <- heatmap_mat[ , -1]
+
+# Plot heatmap (scaled)
+pheatmap(scale(heatmap_mat),
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         main = "Pathway Heatmap by Parasite Group")
+
+# Kruskal-Wallis test across groups
+kruskal_results <- pathways_long %>%
+  group_by(pathway) %>%
+  summarize(p_value = kruskal.test(RelAbundance ~ ParasiteGroup)$p.value, .groups = "drop") %>%
+  mutate(FDR = p.adjust(p_value, method = "fdr")) %>%
+  arrange(FDR)
+
+# Print significant pathways (FDR < 0.05)
+sig_pathways <- kruskal_results %>% filter(FDR < 0.05)
+
+cat("\nSignificantly different pathways (FDR < 0.05):\n")
+print(sig_pathways)
+
+
+```
+
