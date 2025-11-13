@@ -21,3 +21,5 @@ R version 4.5.1
 `marks_ps.rds`: phyloseq object
 
 # Citation
+Please cite our work as:
+-insert updated citation-
