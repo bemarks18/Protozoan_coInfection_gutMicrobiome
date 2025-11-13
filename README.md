@@ -2,7 +2,7 @@
 
 This is the official github repository for our paper: -insert appropriate link-
 
-The full pipeline of our microbiome analysis is attached in 'Protozoan_Coinfection_gutMicrobiome.Rmd' and includes:
+The full pipeline of our microbiome analysis is attached in `Protozoan_Coinfection_gutMicrobiome.Rmd` and includes:
 
 -alpha diversity analysis
 
