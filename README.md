@@ -1,4 +1,4 @@
-# -Co-infection with G. lamblia, C. parvum, and E. histolytica disrupts gut microbial diversity and enriches specific bacterial taxa in school-aged children-
+# Co-infection with G. lamblia, C. parvum, and E. histolytica disrupts gut microbial diversity and enriches specific bacterial taxa in school-aged children
 
 This is the official github repository for our paper: -insert appropriate link-
 
@@ -8,13 +8,11 @@ The full pipeline of our microbiome analysis is attached in 'filename' and inclu
 
 -beta diversity analysis
 
--differential abundance analysis
+-relative and differential abundance analysis
 
 -linear discriminant analysis
 
--functional pathway analysis
-
--food security status prediction with an ML model
+-Protozoan infection status prediction with an ML model
 
 # Requirements
 
