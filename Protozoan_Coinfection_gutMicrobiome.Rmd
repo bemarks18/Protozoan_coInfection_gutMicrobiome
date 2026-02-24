@@ -1,4 +1,4 @@
----
+ ---
 title: "Picrust_7/28/2025"
 author: "Benjamin Marks"
 date: "2025-07-28"
@@ -10,219 +10,203 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{R}
+# ONLY PICRUST STUFF
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(tibble); library(stringr)
+  library(phyloseq)
+  library(ggplot2)
+  library(ggprism)
+  library(GGally)
+  library(ggpicrust2)
+})
 
+# Helper: clean sample IDs
+.clean_ids <- function(x){
+  x <- as.character(x)
+  x <- gsub("^UniqueID", "", x, ignore.case = TRUE)
+  x <- gsub("^X(?=\\d)", "", x, perl = TRUE)
+  trimws(x)
+}
 
-# Load libraries
-library(tidyverse)
-library(pheatmap)
-library(ggpubr)
+run_picrust_daa_metacyc <- function(
+  file_name,
+  ps_obj,
+  group_col,
+  recode_map   = NULL,
+  p_adj_cutoff = 0.10,
+  p_raw_cutoff = 0.05,
+  top_n        = 20,
+  min_nonzero  = 3
+){
+  # 1) Load & tidy abundance (MetaCyc)
+  raw <- readr::read_tsv(file_name, show_col_types = FALSE)
+  if (!"pathway" %in% names(raw))
+    stop("The input table must contain a 'pathway' column (MetaCyc IDs).")
 
+  abundance <- raw |>
+    select(-any_of("description")) |>
+    column_to_rownames("pathway") |>
+    as.data.frame()
 
-# Load and clean column names
-pathways <- read_tsv("~/Downloads/PipelineResults_c8e5bc14832f/pathways_out/path_abun_unstrat_descrip.tsv") %>%
-  rename_with(.cols = -c(pathway, description),
-              .fn = ~ str_remove(., "^UniqueID"))
+  # Clean sample IDs
+  colnames(abundance) <- .clean_ids(colnames(abundance))
 
+  # Ensure numeric
+  suppressWarnings(abundance[] <- lapply(abundance, as.numeric))
 
-# Load metadata
-# Replace with your actual file path
-metadata <- meta  # must include SampleID, ParasiteGroup
+  # Collapse duplicate sample IDs if any
+  if (any(duplicated(colnames(abundance)))) {
+    warning("Duplicated sample IDs after cleaning; collapsing by mean.")
+    abund_t <- t(abundance)
+    grp <- colnames(abundance)
+    abund_sum <- rowsum(abund_t, group = grp)
+    abundance <- t(abund_sum / as.vector(table(grp)))
+  }
 
-# Correct sample ID check
-all(colnames(pathways)[-c(1,2)] %in% metadata$SampleID)
+  # 2) Metadata
+  meta <- as(sample_data(ps_obj), "data.frame") |>
+    rownames_to_column("sample_name")
 
+  if (!group_col %in% names(meta)) {
+    stop(sprintf("Column '%s' not found in sample_data(ps_obj).", group_col))
+  }
 
-# Copy and normalize only sample columns (assumes first 2 are pathway + description)
-pathways_rel <- pathways
+  if (!is.null(recode_map)) {
+    meta[[group_col]] <- dplyr::recode(as.character(meta[[group_col]]), !!!recode_map)
+  }
+  meta[[group_col]] <- as.factor(meta[[group_col]])
 
-# Convert sample columns to numeric just in case
-pathways_rel[ , -c(1,2)] <- pathways_rel[ , -c(1,2)] %>%
-  mutate(across(everything(), as.numeric))
+  # 3) Align samples
+  common <- intersect(colnames(abundance), meta$sample_name)
+  message(sprintf("PICRUSt2 samples: %d | phyloseq samples: %d | overlap: %d",
+                  ncol(abundance), nrow(meta), length(common)))
+  if (length(common) < 3) {
+    stop("Fewer than 3 overlapping samples after cleaning.")
+  }
 
-# Normalize each column to relative abundance
-pathways_rel[ , -c(1,2)] <- sweep(pathways_rel[ , -c(1,2)], 2, colSums(pathways_rel[ , -c(1,2)]), FUN = "/")
+  abundance <- abundance[, common, drop = FALSE]
+  meta      <- meta |> filter(sample_name %in% common)
+  abundance <- abundance[, meta$sample_name, drop = FALSE]
 
+  # Optional: prefilter sparse features
+  if (min_nonzero > 1L) {
+    keep <- rowSums(abundance > 0, na.rm = TRUE) >= min_nonzero
+    abundance <- abundance[keep, , drop = FALSE]
+  }
 
-# Pivot longer only sample columns (assumes pathway and description are the first 2)
-pathways_long <- pathways_rel %>%
-  pivot_longer(
-    cols = -c(pathway, description),  # exclude non-sample columns
-    names_to = "SampleID",
-    values_to = "RelAbundance"
+  # 4) DAA (LinDA on MetaCyc)
+  daa_res <- pathway_daa(
+    abundance  = abundance,
+    metadata   = meta,
+    group      = group_col,
+    daa_method = "LinDA"
   )
 
+  annot <- pathway_annotation(
+    pathway        = "MetaCyc",
+    daa_results_df = daa_res,
+    ko_to_kegg     = FALSE
+  )
 
-# Identify top 10 most abundant pathways across all samples
-top_pathways <- pathways_long %>%
-  group_by(pathway) %>%
-  summarize(mean_abund = mean(RelAbundance)) %>%
-  slice_max(mean_abund, n = 10)
+  # 5) Detect p-value columns
+  p_adj_col <- intersect(c("p_adjust","p.adjust","padj","q_value","qvalue"), names(annot))[1]
+  p_col     <- intersect(c("p_values","p.value","pvalue","p"), names(annot))[1]
+  if (is.na(p_adj_col)) stop("Adjusted p-value column not found in DAA results.")
+  if (is.na(p_col))     p_col <- p_adj_col
 
-# Filter data for top pathways
-top_plot_data <- pathways_long %>%
-  filter(pathway %in% top_pathways$pathway)
+  # Clean p-value table
+  pval_table <- annot |>
+    dplyr::transmute(
+      feature,
+      description = dplyr::coalesce(.data$description, feature),
+      p_value     = .data[[p_col]],
+      p_adjust    = .data[[p_adj_col]]
+    )
 
+  # 6) Check if adjusted p's are significant
+  # --- choose which p-values to drive the plot threshold (fallback if none sig)
+  n_sig_adj <- sum(annot[[p_adj_col]] <= p_adj_cutoff, na.rm = TRUE)
+  use_raw_p_for_plot <- (is.na(n_sig_adj) || n_sig_adj == 0)
 
-# Join pathway abundance data with metadata by SampleID
-top_plot_data <- top_plot_data %>%
-  left_join(metadata, by = "SampleID")
+  if (use_raw_p_for_plot) {
+    message(sprintf(
+      "No pathways significant at adjusted p ≤ %.3f; using raw p-values for plotting.",
+      p_adj_cutoff
+    ))
+    # Keep all columns, but for plotting, treat raw p as the adjusted p
+    daa_for_plot <- annot
+    daa_for_plot[[p_adj_col]] <- annot[[p_col]]   # <- key line
 
+    # Rank/top-N by raw p-values
+    top_feats <- annot |>
+      dplyr::arrange(.data[[p_col]]) |>
+      dplyr::slice_head(n = top_n) |>
+      dplyr::pull(feature)
 
+    plot_threshold <- p_raw_cutoff  # use your raw-p cutoff here
+  } else {
+    daa_for_plot <- annot
+    # Rank/top-N by adjusted p (tie-break by raw p)
+    top_feats <- annot |>
+      dplyr::arrange(.data[[p_adj_col]], .data[[p_col]]) |>
+      dplyr::slice_head(n = top_n) |>
+      dplyr::pull(feature)
 
-ggplot(top_plot_data, aes(x = EH_GL_C, y = RelAbundance, fill = EH_GL_C)) +
-  geom_boxplot() +
-  facet_wrap(~ pathway, scales = "free_y") +
-  theme_minimal() +
-  labs(title = "Top 10 MetaCyc Pathways by Parasite Group",
-       x = "EH_GL_C", y = "Relative Abundance") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  stat_compare_means(aes(group = EH_GL_C), method = "wilcox.test", label = "p.format")
-
-
-# Generate heatmap of mean pathway abundance by ParasiteGroup
-heatmap_data <- pathway_long_rel %>%
-  group_by(pathway, ParasiteGroup) %>%
-  summarize(mean_abund = mean(RelAbundance), .groups = 'drop') %>%
-  pivot_wider(names_from = ParasiteGroup, values_from = mean_abund)
-
-heatmap_mat <- as.data.frame(heatmap_data)
-rownames(heatmap_mat) <- heatmap_mat$pathway
-heatmap_mat <- heatmap_mat[,-1]
-
-# Plot heatmap
-pheatmap(scale(heatmap_mat),
-         clustering_distance_rows = "euclidean",
-         clustering_distance_cols = "euclidean",
-         main = "Pathway Heatmap by Parasite Group")
-
-# Kruskal-Wallis test for pathway differences
-kruskal_results <- pathway_long_rel %>%
-  group_by(pathway) %>%
-  summarize(p_value = kruskal.test(RelAbundance ~ ParasiteGroup)$p.value) %>%
-  mutate(FDR = p.adjust(p_value, method = "fdr")) %>%
-  arrange(FDR)
-
-# Show significant pathways (adjust threshold if needed)
-sig_pathways <- kruskal_results %>%
-  filter(FDR < 0.05)
-
-print("Significantly different pathways (FDR < 0.05):")
-print(sig_pathways)
+    plot_threshold <- p_adj_cutoff
+  }
 
 
-```
+  # 7) Plot
+  p_err <- pathway_errorbar(
+    abundance          = abundance,
+    daa_results_df     = daa_for_plot,
+    Group              = meta[[group_col]],
+    p_values_threshold = plot_threshold,
+    order              = "group",
+    select             = top_feats,
+    ko_to_kegg         = FALSE,
+    p_value_bar        = TRUE,
+    x_lab              = "description"
+  ) +
+    ggprism::theme_prism() +
+    ggtitle(paste(group_col)) +
+    theme(
+      legend.position = "right",
+      plot.title = element_text(hjust = 0)  # ← left aligned
+    )
 
-```{R}
+  # 8) Return objects only
+  invisible(list(
+    abundance          = abundance,
+    metadata           = meta,
+    daa_results        = daa_res,
+    annotated_results  = annot,
+    pval_table         = pval_table,
+    top_features       = top_feats,
+    errorbar_plot      = p_err,
+    used_raw_p_for_plot = use_raw_p_for_plot
+  ))
+}
 
 
+out <- run_picrust_daa_metacyc(
+  file_name   = "picrust_pathways_table.tsv",
+  ps_obj      = ben_phyloseq,
+  group_col   = "ANY",
+  recode_map  = c("0"="neg","1"="pos"),
+  p_adj_cutoff = 0.15,
+  p_raw_cutoff = 0.05,
+  top_n        = 10
+)
 
+# View 
+out$errorbar_plot        # display plot
+out$used_raw_p_for_plot  # TRUE if fallback happened & if adjusted p-values are not significant
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Load libraries
-library(tidyverse)
-library(ggpubr)
-library(pheatmap)
-
-# Load and clean column names from PICRUSt2
-pathways <- read_tsv("~/Downloads/PipelineResults_c8e5bc14832f/pathways_out/path_abun_unstrat_descrip.tsv") %>%
-  rename_with(.cols = -c(pathway, description),
-              .fn = ~ str_remove(., "^UniqueID"))
-
-# Load metadata (must include SampleID and parasite group columns)
-metadata <- meta  # assume already loaded with SampleID, EH_GL_C, etc.
-
-# Check if sample IDs match
-stopifnot(all(colnames(pathways)[-c(1,2)] %in% metadata$SampleID))
-
-# Normalize to relative abundance
-pathways_rel <- pathways
-pathways_rel[ , -c(1,2)] <- pathways_rel[ , -c(1,2)] %>%
-  mutate(across(everything(), as.numeric))
-pathways_rel[ , -c(1,2)] <- sweep(pathways_rel[ , -c(1,2)],
-                                  2, colSums(pathways_rel[ , -c(1,2)]), FUN = "/")
-
-# Pivot to long format
-pathways_long <- pathways_rel %>%
-  pivot_longer(cols = -c(pathway, description),
-               names_to = "SampleID",
-               values_to = "RelAbundance")
-
-# Merge with metadata
-pathways_long <- pathways_long %>%
-  left_join(metadata, by = "SampleID")
-
-# Identify top 10 most variable pathways
-top_pathways <- pathways_long %>%
-  group_by(pathway) %>%
-  summarize(sd_abund = sd(RelAbundance), .groups = "drop") %>%
-  slice_max(sd_abund, n = 10)
-
-# Filter data for those pathways
-top_plot_data <- pathways_long %>%
-  filter(pathway %in% top_pathways$pathway)
-
-# Boxplot with p-values by infection group (change 'EH_GL_C' if needed)
-ggplot(top_plot_data, aes(x = ANY, y = RelAbundance, fill = ANY)) +
-  geom_boxplot() +
-  facet_wrap(~ pathway, scales = "free_y") +
-  theme_minimal() +
-  labs(title = "Top 10 Most Variable MetaCyc Pathways by Parasite Group",
-       x = "Parasite Group (ANY)", y = "Relative Abundance") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  stat_compare_means(aes(group = ANY), method = "wilcox.test", label = "p.format")
-
-# Heatmap: mean abundance by ParasiteGroup
-heatmap_data <- pathways_long %>%
-  group_by(pathway, ParasiteGroup) %>%
-  summarize(mean_abund = mean(RelAbundance), .groups = "drop") %>%
-  pivot_wider(names_from = ParasiteGroup, values_from = mean_abund)
-
-# Prepare matrix for heatmap
-heatmap_mat <- as.data.frame(heatmap_data)
-rownames(heatmap_mat) <- heatmap_mat$pathway
-heatmap_mat <- heatmap_mat[ , -1]
-
-# Plot heatmap (scaled)
-pheatmap(scale(heatmap_mat),
-         clustering_distance_rows = "euclidean",
-         clustering_distance_cols = "euclidean",
-         main = "Pathway Heatmap by Parasite Group")
-
-# Kruskal-Wallis test across groups
-kruskal_results <- pathways_long %>%
-  group_by(pathway) %>%
-  summarize(p_value = kruskal.test(RelAbundance ~ ParasiteGroup)$p.value, .groups = "drop") %>%
-  mutate(FDR = p.adjust(p_value, method = "fdr")) %>%
-  arrange(FDR)
-
-# Print significant pathways (FDR < 0.05)
-sig_pathways <- kruskal_results %>% filter(FDR < 0.05)
-
-cat("\nSignificantly different pathways (FDR < 0.05):\n")
-print(sig_pathways)
-
+# print entire table (all rows)
+pval_sorted <- out$pval_table |>
+  dplyr::arrange(p_adjust, p_value)
+print(pval_sorted, n = Inf)
 
 ```
 
