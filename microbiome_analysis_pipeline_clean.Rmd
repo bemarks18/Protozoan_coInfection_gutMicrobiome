@@ -1,0 +1,1381 @@
+---
+title: 'Gut Microbiome Analysis: Clean'
+author: Benjamin Marks and Angie Zhu
+output: html_document
+date: "2025-06-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Code created by Benjamin Marks and Angie Zhu
+
+## 0 - Load Libraries
+```{r libraries}
+
+library(phyloseq)
+library(vegan)
+library(rstatix)
+library(Maaslin2)
+library(haven)    
+library(ggrepel)
+library(RColorBrewer)
+library(rlang)
+library(dplyr)
+library(ggsci)
+library(ggpubr)
+library(patchwork)
+library(viridis)
+library(microbiomeMarker)
+library(MicrobiotaProcess)
+library(ggplot2)
+library(ALDEx2)
+```
+
+
+## 1 - Load data
+```{r load data}
+
+ps_gutMicro <- readRDS("ben_phyloseq.rds") # put your filename here
+
+
+# Clean taxonomy levels (if not done already)
+tax_table_ps <- phyloseq::tax_table(ps_gutMicro)
+colnames(tax_table_ps) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+tax_table(ps_gutMicro) <- tax_table_ps
+```
+
+
+## 2 - Select Variables
+```{r variables}
+# Access sample metadata, look at it and choose the variables you are interested in
+meta <- as.data.frame(phyloseq::sample_data(ps_gutMicro)) # should have 57 samples/rows
+
+# Investigating variables
+variables1 <- c("EH", "GL", "C", "EH_GL", "EH_C", "GL_C", "EH_GL_C", "ANY")
+
+
+meta$sex <- factor(
+  meta$sex,
+  levels = c(1, 2),        
+  labels = c("Male", "Female")
+) 
+meta$EH <- factor(
+  meta$EH,
+  levels = c(0, 1),        
+  labels = c("neg", "pos")
+) 
+meta$GL <- factor(
+  meta$GL,
+  levels = c(0, 1),        
+  labels = c("neg", "pos")
+) 
+
+meta$C <- factor(
+  meta$C,
+  levels = c(0, 1),        
+  labels = c("neg", "pos")
+) 
+
+meta$EH_GL <- factor(
+  meta$EH_GL,
+  levels = c(0, 1),        
+  labels = c("neg", "pos")
+) 
+
+meta$EH_C <- factor(
+  meta$EH_C,
+  levels = c(0, 1),        
+  labels = c("neg", "pos")
+) 
+
+meta$GL_C <- factor(
+  meta$GL_C,
+  levels = c(0, 1),        
+  labels = c("neg", "pos")
+) 
+
+meta$EH_GL_C <- factor(
+  meta$EH_GL_C,
+  levels = c(0, 1),        
+  labels = c("neg", "pos")
+) 
+
+meta$ANY <- factor(
+  meta$ANY,
+  levels = c(0, 1),        
+  labels = c("neg", "pos")
+) 
+phyloseq::sample_data(ps_gutMicro) <- meta
+```
+
+
+## 3 - Alpha Diversity Plot (Chao1 and Shannon index)
+```{r alpha diversity}
+
+# for categorical variables (box plot)
+a_diversity_categorical <- function(ps, variable, title=variable) {
+  
+  sam_data <- as(phyloseq::sample_data(ps), "data.frame")
+  keep_samples <- !is.na(sam_data[[variable]])
+  ps_filtered <- prune_samples(keep_samples, ps)
+  sam_data_filtered <- as(phyloseq::sample_data(ps_filtered), "data.frame")
+  value_counts <- table(sam_data_filtered[[variable]])
+  valid_values <- names(value_counts)[value_counts >= 1]
+  final_keep_samples <- sam_data_filtered[[variable]] %in% valid_values
+  ps_final <- prune_samples(final_keep_samples, ps_filtered)
+  alpha_div <- estimate_richness(ps_final, measures = c("Chao1", "Shannon"))
+  alpha_div$sample_id <- rownames(alpha_div)
+  alpha_div <- merge(alpha_div, sam_data_filtered, by.x = "sample_id", by.y = "row.names")
+  
+  phyloseq::sample_data(ps_final)[[variable]] <- factor(phyloseq::sample_data(ps_final)[[variable]])
+  
+  a_diversity_factor <- plot_richness(ps_final, x = variable, color = variable, 
+                                      measures = c("Chao1", "Shannon"))
+  a_diversity_factor$layers[[2]] = NULL 
+  
+  a_diversity_factor <- a_diversity_factor + 
+    geom_boxplot() + 
+    geom_jitter(alpha = 0.25) + 
+    theme_bw() + 
+    theme(axis.text = element_text(size = 10),
+          axis.title = element_text(size = 12, face = "bold"), 
+          legend.position = "none", 
+          axis.text.x = element_text(size = 10)) + 
+    labs(x = title) + 
+    stat_compare_means(
+      method = "kruskal.test",
+      label = "p.format",
+      label.x = 1,
+      label.y = Inf,
+      hjust = 1.1,
+      vjust = 1.5,
+      size = 3.5
+    )
+  
+  print(a_diversity_factor)
+  return(a_diversity_factor)
+}
+
+
+# for continuous variables (scatter plot)
+a_diversity_continuous <- function(ps, variable, title = variable, measures = c("Chao1", "Shannon")) {
+  
+  # Estimate richness
+  alpha_div <- estimate_richness(ps, measures = measures)
+  rownames(alpha_div) <- sub("^X", "", rownames(alpha_div))
+  
+  sdf <- as.data.frame(phyloseq::sample_data(ps))
+  variable <- as.character(variable)
+  if (!(variable %in% colnames(sdf))) {
+    stop(paste("Variable", variable, "not found in phyloseq::sample_data!"))
+  }
+  tmp_var <- sdf[rownames(alpha_div), variable]
+  alpha_div[[variable]] <- as.numeric(unlist(tmp_var))
+  alpha_div <- alpha_div[!is.na(alpha_div[[variable]]), ]
+  
+  # Left plot: y-axis label, no x-axis label
+  p1 <- ggscatter(
+    alpha_div, x = variable, y = measures[1],
+    add = "reg.line", conf.int = TRUE,
+    cor.coef = TRUE, cor.method = "pearson",
+    xlab = NULL, ylab = "Alpha Diversity Measure",
+    size = 2
+  ) +
+    theme_bw() +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title.y = element_text(size = 13, face = "bold", angle = 90, vjust = 1),
+      axis.title.x = element_blank(),
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    ggtitle(measures[1])
+
+  # Right plot: no axis labels
+  p2 <- ggscatter(
+    alpha_div, x = variable, y = measures[2],
+    add = "reg.line", conf.int = TRUE,
+    cor.coef = TRUE, cor.method = "pearson",
+    xlab = NULL, ylab = NULL,
+    size = 2
+  ) +
+    theme_bw() +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_blank(),
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    ggtitle(measures[2])
+
+  # Combine with patchwork
+  combined_plot <- p1 + p2 +
+    plot_layout(nrow = 1, guides = "collect") &
+    theme(
+      axis.title.x = element_blank() # keep blank!
+    )
+
+  # Add x-axis label below using patchwork::wrap_elements
+  combined_plot <- combined_plot / 
+    patchwork::wrap_elements(
+      grid::textGrob(title, gp = grid::gpar(fontsize = 13, fontface = "bold"))
+    ) +
+    plot_layout(heights = c(10, 1))
+
+  print(combined_plot)
+  return(combined_plot)
+}
+EH <- a_diversity_categorical(ps_gutMicro, variable = "EH", title = "Entamoeba histolytica")
+GL <- a_diversity_categorical(ps_gutMicro, variable = "GL", title = "Giardia lamblia")
+C <- a_diversity_categorical(ps_gutMicro, variable = "C", title = "Cryptosporidium")
+
+ggsave("EH_alpha.png", plot = EH, width = 6, height = 4, dpi = 500)
+ggsave("GL_alpha.png", plot = GL, width = 6, height = 4, dpi = 500)
+ggsave("C_alpha.png", plot = C, width = 6, height = 4, dpi = 500)
+ggsave("ANY_alpha.png", plot = ANY, width = 6, height = 4, dpi = 500)
+
+ggsave("EH_GL_alpha.png", plot = EH_GL, width = 6, height = 4, dpi = 500)
+ggsave("EH_C_alpha.png", plot = EH_C, width = 6, height = 4, dpi = 500)
+ggsave("GL_C_alpha.png", plot = GL_C, width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_C_alpha.png", plot = EH_GL_C, width = 6, height = 4, dpi = 500)
+
+
+EH_GL <- a_diversity_categorical(ps_gutMicro, variable = "EH_GL", title = "Entamoeba histloytica and Giardia Lamblia Coinfection")
+EH_C <- a_diversity_categorical(ps_gutMicro, variable = "EH_C", title = "Entamoeba histloytica and Cryptosporidium Coinfection")
+GL_C <- a_diversity_categorical(ps_gutMicro, variable = "GL_C", title = "Giardia lamblia and Cryptosporidium Coinfection")
+EH_GL_C <- a_diversity_categorical(ps_gutMicro, variable = "EH_GL_C", title = "Entamoeba Histolytica, Giardia lamblia, and Cryptosporidium parvum Coinfection")
+ANY <- a_diversity_categorical(ps_gutMicro, variable = "ANY", title = "Any Protozoan Infection")
+
+```
+
+
+## 4 - Beta Diversity (Bray & Jaccard)
+```{r beta diversity}
+
+# beta diversity pcoa plot w/ bray distance
+# categorical variable
+beta_diversity_bray_plot_categorical <- function(ps, variable, title_name=variable) {
+  
+  # Convert sample data to data frame
+  sam_data <- as(phyloseq::sample_data(ps), "data.frame")
+  
+  # Remove NAs
+  keep_samples <- !is.na(sam_data[[variable]])
+  ps_filtered <- prune_samples(keep_samples, ps)
+  
+  # Updated sample data after NA removal
+  sam_data_filtered <- as(phyloseq::sample_data(ps_filtered), "data.frame")
+  
+  # Count occurrences of each value in the variable
+  value_counts <- table(sam_data_filtered[[variable]])
+  print(value_counts)  # View group sizes
+  
+  # Identify values that appear at least 3 times (PCOA plot can't draw ellipse with < 3 points)
+  valid_values <- names(value_counts)[value_counts >= 3]
+  
+  # Filter samples to only include those with valid values
+  final_keep_samples <- sam_data_filtered[[variable]] %in% valid_values
+  ps_final <- prune_samples(final_keep_samples, ps_filtered)
+  
+  # Get final sample data
+  sam_data_final <- as(phyloseq::sample_data(ps_final), "data.frame")
+  
+  # Perform PCoA
+  pcoares <- get_pcoa(obj = ps_final, distmethod = "bray", method = "hellinger")
+  
+  # Perform PERMANOVA to get p-value
+  physeq_dist <- phyloseq::distance(ps_final, method = "bray")
+  permanova <- vegan::adonis2(physeq_dist ~ sam_data_final[[variable]])
+  p_value <- permanova$`Pr(>F)`[1]
+  
+  # Format p-value for display
+  p_text <- ifelse(p_value < 0.001, "p < 0.001", 
+                   paste("p =", format(round(p_value, 3), nsmall = 3)))
+  
+  # Create PCoA plot
+  pcoaplot <- ggordpoint(obj = pcoares, biplot = FALSE, speciesannot = TRUE,
+                         factorNames = c(variable), ellipse = TRUE, linesize = 1.5, 
+                         ellipse_linewd = 1, ellipse_lty = 2) +
+    ggtitle(title_name) + 
+    guides(color=guide_legend(title=title_name, 
+                              override.aes = list(size = 4))) +
+    theme( 
+          legend.title = element_blank(), 
+          legend.text = element_text(size = 20)) +
+    # Add p-value annotation
+    annotate("text", x = Inf, y = Inf, 
+             label = p_text, 
+             hjust = 1.1, vjust = 1.5, 
+             size = 4, fontface = "bold") +
+    labs(color = paste("Kitchen Floor Material"))
+  
+  print(pcoaplot)
+  return(pcoaplot)
+}
+
+beta_diversity_bray_plot_continuous <- function(ps, variable, title_name = variable) {
+  # Convert sample data to data frame
+  sam_data <- as(phyloseq::sample_data(ps), "data.frame")
+  
+  # Remove NAs in the variable
+  keep_samples <- !is.na(sam_data[[variable]])
+  ps_filtered <- prune_samples(keep_samples, ps)
+  sam_data_filtered <- as(phyloseq::sample_data(ps_filtered), "data.frame")
+  
+  # Check variable is numeric/continuous
+  if(!is.numeric(sam_data_filtered[[variable]])) {
+    stop("Selected variable must be numeric/continuous!")
+  }
+  
+  # Perform PCoA
+  ord <- ordinate(ps_filtered, method = "PCoA", distance = "bray")
+  pco_df <- as.data.frame(ord$vectors)[, 1:2]
+  pco_df$SampleID <- rownames(pco_df)
+  pco_df$Variable <- sam_data_filtered[rownames(pco_df), variable]
+  
+  # Calculate PERMANOVA p-value (on continuous variable)
+  physeq_dist <- phyloseq::distance(ps_filtered, method = "bray")
+  ad <- vegan::adonis2(physeq_dist ~ sam_data_filtered[[variable]])
+  p_value <- ad$`Pr(>F)`[1]
+  p_text <- ifelse(p_value < 0.001, "p < 0.001", paste("p =", format(round(p_value, 3), nsmall = 3)))
+  
+  # Plot
+  plt <- ggplot(pco_df, aes(x = Axis.1, y = Axis.2, color = Variable)) +
+    geom_point(size = 4, alpha = 0.9) +
+    scale_color_viridis_c(option = "plasma", name = variable) +
+    labs(
+      title = title_name,
+      subtitle = p_text,
+      x = "PCoA Axis 1",
+      y = "PCoA Axis 2"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 18, face = "bold"),
+      plot.subtitle = element_text(size = 14),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 12)
+    )
+  print(plt)
+  return(plt)
+}
+
+beta_diversity_jaccard_plot_categorical <- function(ps, variable, title_name=variable) {
+  sam_data <- as(phyloseq::sample_data(ps), "data.frame")
+  keep_samples <- !is.na(sam_data[[variable]])
+  ps_filtered <- prune_samples(keep_samples, ps)
+  sam_data_filtered <- as(phyloseq::sample_data(ps_filtered), "data.frame")
+  value_counts <- table(sam_data_filtered[[variable]])
+  print(value_counts)
+  valid_values <- names(value_counts)[value_counts >= 3]
+  final_keep_samples <- sam_data_filtered[[variable]] %in% valid_values
+  ps_final <- prune_samples(final_keep_samples, ps_filtered)
+  sam_data_final <- as(phyloseq::sample_data(ps_final), "data.frame")
+  
+  # PCoA with Jaccard
+  pcoares <- get_pcoa(obj = ps_final, distmethod = "jaccard", method = "hellinger")
+  
+  # PERMANOVA with Jaccard
+  physeq_dist <- phyloseq::distance(ps_final, method = "jaccard")
+  permanova <- vegan::adonis2(physeq_dist ~ sam_data_final[[variable]])
+  p_value <- permanova$`Pr(>F)`[1]
+  p_text <- ifelse(p_value < 0.001, "p < 0.001", 
+                   paste("p =", format(round(p_value, 3), nsmall = 3)))
+  
+  pcoaplot <- ggordpoint(obj = pcoares, biplot = FALSE, speciesannot = TRUE,
+                         factorNames = c(variable), ellipse = TRUE, linesize = 1.5, 
+                         ellipse_linewd = 1, ellipse_lty = 2) +
+    ggtitle(title_name) + 
+    guides(color=guide_legend(title=title_name, override.aes = list(size = 4))) +
+    theme(legend.title = element_blank(), legend.text = element_text(size = 20)) +
+    annotate("text", x = Inf, y = Inf, 
+             label = p_text, 
+             hjust = 1.1, vjust = 1.5, 
+             size = 4, fontface = "bold") +
+    labs(color = variable)
+  print(pcoaplot)
+  return(pcoaplot)
+}
+
+beta_diversity_jaccard_plot_continuous <- function(ps, variable, title_name = variable) {
+  sam_data <- as(phyloseq::sample_data(ps), "data.frame")
+  keep_samples <- !is.na(sam_data[[variable]])
+  ps_filtered <- prune_samples(keep_samples, ps)
+  sam_data_filtered <- as(phyloseq::sample_data(ps_filtered), "data.frame")
+  if(!is.numeric(sam_data_filtered[[variable]])) {
+    stop("Selected variable must be numeric/continuous!")
+  }
+  
+  # PCoA with Jaccard
+  ord <- ordinate(ps_filtered, method = "PCoA", distance = "jaccard")
+  pco_df <- as.data.frame(ord$vectors)[, 1:2]
+  pco_df$SampleID <- rownames(pco_df)
+  pco_df$Variable <- sam_data_filtered[rownames(pco_df), variable]
+  
+  # PERMANOVA with Jaccard
+  physeq_dist <- phyloseq::distance(ps_filtered, method = "jaccard")
+  ad <- vegan::adonis2(physeq_dist ~ sam_data_filtered[[variable]])
+  p_value <- ad$`Pr(>F)`[1]
+  p_text <- ifelse(p_value < 0.001, "p < 0.001", paste("p =", format(round(p_value, 3), nsmall = 3)))
+  
+  plt <- ggplot(pco_df, aes(x = Axis.1, y = Axis.2, color = Variable)) +
+    geom_point(size = 4, alpha = 0.9) +
+    scale_color_viridis_c(option = "plasma", name = variable) +
+    labs(
+      title = title_name,
+      subtitle = p_text,
+      x = "PCoA Axis 1",
+      y = "PCoA Axis 2"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 18, face = "bold"),
+      plot.subtitle = element_text(size = 14),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 12)
+    )
+  print(plt)
+  return(plt)
+}
+
+for (var in variables1){
+  A <- beta_diversity_bray_plot_categorical(ps_gutMicro, var)
+  B <- beta_diversity_jaccard_plot_categorical(ps_gutMicro, var)
+}
+
+EHbray <- beta_diversity_bray_plot_categorical(ps_gutMicro, variable = "EH", title = "Entamoeba histolytica")
+EHjacard <- beta_diversity_jaccard_plot_categorical(ps_gutMicro, variable = "EH", title = "Entamoeba histolytica")
+GLbray <- beta_diversity_bray_plot_categorical(ps_gutMicro, variable = "GL", title = "Giardia lamblia")
+GLjacard <- beta_diversity_jaccard_plot_categorical(ps_gutMicro, variable = "GL", title = "Giardia lamblia")
+Cbray <- beta_diversity_bray_plot_categorical(ps_gutMicro, variable = "C", title = "Cryptosporidium")
+Cjacard <- beta_diversity_jaccard_plot_categorical(ps_gutMicro, variable = "C", title = "Cryptosporidium")
+ANYbray <- beta_diversity_bray_plot_categorical(ps_gutMicro, variable = "ANY", title = " ")
+ANYjacard <- beta_diversity_jaccard_plot_categorical(ps_gutMicro, variable = "ANY", title = " ")
+
+ggsave("EH_beta.png", plot = EHbray, width = 6, height = 4, dpi = 500)
+ggsave("GL_beta.png", plot = GLbray, width = 6, height = 4, dpi = 500)
+ggsave("C_beta.png", plot = Cbray, width = 6, height = 4, dpi = 500)
+ggsave("ANY_beta.png", plot = ANYbray, width = 6, height = 4, dpi = 500)
+
+
+
+EH_GLbray <- beta_diversity_bray_plot_categorical(ps_gutMicro, variable = "EH_GL", title = "EH_GL")
+EH_Cbray <- beta_diversity_bray_plot_categorical(ps_gutMicro, variable = "EH_C", title = "EH_C")
+GL_Cbray <- beta_diversity_bray_plot_categorical(ps_gutMicro, variable = "GL_C", title = "GL_C")
+EH_GL_Cbray <- beta_diversity_bray_plot_categorical(ps_gutMicro, variable = "EH_GL_C", title = "EH_GL_C")
+
+ggsave("EH_GL_beta.png", plot = EH_GLbray, width = 6, height = 4, dpi = 500)
+ggsave("EH_C_beta.png", plot = EH_Cbray, width = 6, height = 4, dpi = 500)
+ggsave("GL_C_beta.png", plot = GL_Cbray, width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_C_beta.png", plot = EH_GL_Cbray, width = 6, height = 4, dpi = 500)
+
+
+```
+
+## 5 - Relative Abundance Barplot (Genus & Family)
+```{r relative abundance}
+
+family_barplot_categorical <- function(ps, variable, title_name=variable) {
+  
+  # Convert sample data to data frame
+  sam_data <- as(phyloseq::sample_data(ps), "data.frame")
+  
+  # First remove NAs
+  keep_samples <- !is.na(sam_data[[variable]])
+  ps_filtered <- prune_samples(keep_samples, ps)
+  
+  # Get updated sample data after NA removal
+  sam_data_filtered <- as(phyloseq::sample_data(ps_filtered), "data.frame")
+  
+  # Count occurrences of each value in the variable
+  value_counts <- table(sam_data_filtered[[variable]])
+  
+  # Identify values that appear at least 5 times
+  valid_values <- names(value_counts)[value_counts >= 2]
+  
+  # Filter samples to only include those with valid values
+  final_keep_samples <- sam_data_filtered[[variable]] %in% valid_values
+  ps_final <- prune_samples(final_keep_samples, ps_filtered)
+  
+  familytaxa <- get_taxadf(obj = ps_final, taxlevel = 5)
+  barplot <- ggbartax(obj = familytaxa, facetNames = variable, plotgroup = TRUE, topn = 10) +
+    xlab(NULL) +
+    ylab("Relative Abundance (%)") +
+    labs(title = title_name) +  
+    scale_fill_manual(values = c(colorRampPalette(RColorBrewer::brewer.pal(12, "Set3"))(31))) +
+    guides(fill = guide_legend(keywidth = 0.5, keyheight = 0.5, ncol = 2))
+  
+  
+  print(barplot)
+  return(barplot)
+}
+
+genus_barplot_categorical <- function(ps, variable, title_name=variable) {
+  
+  # Convert sample data to data frame
+  sam_data <- as(phyloseq::sample_data(ps), "data.frame")
+  
+  # First remove NAs
+  keep_samples <- !is.na(sam_data[[variable]])
+  ps_filtered <- prune_samples(keep_samples, ps)
+  
+  # Get updated sample data after NA removal
+  sam_data_filtered <- as(phyloseq::sample_data(ps_filtered), "data.frame")
+  
+  # Count occurrences of each value in the variable
+  value_counts <- table(sam_data_filtered[[variable]])
+  
+  # Identify values that appear at least 5 times
+  valid_values <- names(value_counts)[value_counts >= 2]
+  
+  # Filter samples to only include those with valid values
+  final_keep_samples <- sam_data_filtered[[variable]] %in% valid_values
+  ps_final <- prune_samples(final_keep_samples, ps_filtered)
+  
+  genustaxa <- get_taxadf(obj = ps_final, taxlevel = 6)
+  barplot <- ggbartax(obj = genustaxa, facetNames = variable, plotgroup = TRUE, topn = 15) +
+    xlab(NULL) +
+    ylab("Relative Abundance (%)") +
+    labs(title = title_name, fill = NULL) +  
+    scale_fill_manual(values = c(colorRampPalette(RColorBrewer::brewer.pal(12, "Set3"))(31))) +
+    guides(fill = guide_legend(keywidth = 0.5, keyheight = 0.5, ncol = 2)) +
+    theme_classic() +
+    theme(strip.background = element_blank(), axis.text.x.bottom = element_text(angle = -90))
+  
+  print(barplot)
+  return(barplot)
+}
+
+for (var in variables1){
+  A <- genus_barplot_categorical(ben_phyloseq, var)
+  B <- family_barplot_categorical(ben_phyloseq, var)
+}
+
+
+EHrelab <- genus_barplot_categorical(ps_gutMicro, variable = "EH", title = " ")
+GLrelab <- genus_barplot_categorical(ps_gutMicro, variable = "GL", title = " ")
+Crelab <- genus_barplot_categorical(ps_gutMicro, variable = "C", title = " ")
+ANYrelab <- genus_barplot_categorical(ps_gutMicro, variable = "ANY", title = " ")
+
+EH_GLrelab <- genus_barplot_categorical(ps_gutMicro, variable = "EH_GL", title = " ")
+EH_Crelab <- genus_barplot_categorical(ps_gutMicro, variable = "EH_C", title = " ")
+GL_Crelab <- genus_barplot_categorical(ps_gutMicro, variable = "GL_C", title = " ")
+EH_GL_Crelab <- genus_barplot_categorical(ps_gutMicro, variable = "EH_GL_C", title = " ")
+
+ggsave("EH_GL_relab.png", plot = EH_GLrelab, width = 6, height = 4, dpi = 500)
+ggsave("EH_C_relab.png", plot = EH_Crelab, width = 6, height = 4, dpi = 500)
+ggsave("GL_C_relab.png", plot = GL_Crelab, width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_C_relab.png", plot = EH_GL_Crelab, width = 6, height = 4, dpi = 500)
+
+ggsave("EH_relab.png", plot = EHrelab, width = 6, height = 4, dpi = 500)
+ggsave("GL_relab.png", plot = GLrelab, width = 6, height = 4, dpi = 500)
+ggsave("C_relab.png", plot = Crelab, width = 6, height = 4, dpi = 500)
+ggsave("ANY_relab.png", plot = ANYrelab, width = 6, height = 4, dpi = 500)
+
+
+```
+
+## Differential abundance volcano plot
+```{r maaslin2}
+create_volcano_plot <- function(ps_obj, taxlevel, condition_col, title_name = condition_col) {
+  # Extract sample data, OTU table, taxonomy
+  metadata <- as.data.frame(sample_data(ps_obj))
+  SVs <- as.data.frame(otu_table(ps_obj))
+  taxonomy <- as.data.frame(phyloseq::tax_table(ps_obj))
+  
+  # Accept taxlevel as number or name
+  if (is.numeric(taxlevel)) {
+    tax_col <- colnames(taxonomy)[taxlevel]
+  } else {
+    tax_col <- taxlevel
+  }
+  
+  # Prepare grouping variable
+  var_values <- metadata[[condition_col]]
+  non_na_values <- var_values[!is.na(var_values)]
+  value_counts <- table(non_na_values)
+  
+  # Top 2 most frequent (works for binary factors too)
+  top_values <- names(sort(value_counts, decreasing = TRUE))[1:2]
+  subset_idx <- var_values %in% top_values & !is.na(var_values)
+  metadata <- metadata[subset_idx, , drop = FALSE]
+  
+  # Subset SVs to match samples
+  sample_names_to_use <- rownames(metadata)
+  # Match sample orientation
+  if (taxa_are_rows(ps_obj)) {
+    SVs <- SVs[, sample_names_to_use, drop = FALSE]
+  } else {
+    SVs <- SVs[sample_names_to_use, , drop = FALSE]
+    SVs <- t(SVs)
+  }
+  
+  # Ensure that taxonomy contains the specified level
+  taxonomy <- taxonomy %>%
+    tibble::rownames_to_column(var = "OTU_name") %>%
+    dplyr::select(OTU_name, !!sym(tax_col)) %>%
+    distinct()
+  
+  # Combine SVs with taxonomy
+  SVs_with_taxonomy <- SVs %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column(var = "OTU_name") %>%
+    left_join(taxonomy, by = "OTU_name")
+  
+  # Aggregate by taxonomic level
+  tax_level_SVs <- SVs_with_taxonomy %>%
+    dplyr::select(-OTU_name) %>%
+    group_by(!!sym(tax_col)) %>%
+    summarise(across(everything(), ~sum(.x, na.rm = TRUE))) %>%
+    filter(!is.na(!!sym(tax_col)), !!sym(tax_col) != "none") %>%
+    tibble::column_to_rownames(var = tax_col)
+  
+  # Ensure column/sample order matches metadata
+  tax_level_SVs <- tax_level_SVs[, rownames(metadata)]
+  
+  # Convert to matrix for ALDEx2
+  tax_level_SVs <- as.matrix(tax_level_SVs)
+  condition <- as.character(metadata[[condition_col]])
+  
+  # Run ALDEx2 analysis
+  aldex_data <- aldex(tax_level_SVs, conditions = condition, mc.samples = 128, test = "t", effect = TRUE)
+  results <- data.frame(aldex_data)
+  results <- results %>% tibble::rownames_to_column(var = tax_col)
+  results <- results %>% arrange(we.eBH)
+  
+  # Volcano plot
+  p <- results %>%
+    mutate(Significant = we.eBH < 0.05) %>%
+    mutate(Taxon = as.character(!!sym(tax_col))) %>%
+    mutate(TaxonToPrint = if_else(Significant, paste0(Taxon, " (", round(we.eBH, 3), ")"), "")) %>%
+    ggplot(aes(x = diff.btw, y = -log10(we.ep), color = Significant, label = TaxonToPrint)) +
+    geom_point(alpha = 0.6, shape = 16) +
+    geom_text_repel(size = 4, nudge_y = 0.05, max.overlaps = Inf) +
+    theme_minimal() +
+    xlab("log2(fold change)") +
+    ylab("-log10(P-value)") +
+    scale_color_manual(values = c("black", "red")) +
+    theme(legend.position = "none") +
+    ggtitle(paste(title_name, "\nTaxonomic Level:", tax_col))
+  
+  print(p)
+  return(list(plot = p, table = results))
+}
+
+plot_aldex2_boxplots <- function(
+  ps_obj,
+  aldex2_table,
+  variable = "Condition",
+  variable_name = variable,
+  taxlevel = "Genus"
+) {
+  sig_genera <- aldex2_table %>%
+    filter(we.eBH < 0.05) %>%
+    pull(!!sym(taxlevel)) %>%
+    unique()
+
+  plot_single <- function(genus) {
+    qval <- aldex2_table %>%
+      filter(!!sym(taxlevel) == genus) %>%
+      arrange(we.eBH) %>%
+      slice(1) %>%
+      pull(we.eBH)
+    qval_label <- if (length(qval) == 0) "NA" else formatC(qval, digits = 3, format = "f")
+    auto_title <- paste0(genus, " (q = ", qval_label, ")")
+
+    otumat <- as.data.frame(otu_table(ps_obj))
+    if (!taxa_are_rows(ps_obj)) otumat <- t(otumat)
+    taxmat <- as.data.frame(phyloseq::tax_table(ps_obj))
+    otumat$Taxon <- taxmat[rownames(otumat), taxlevel]
+    
+    feature_table <- otumat %>%
+      group_by(Taxon) %>%
+      summarise(across(where(is.numeric), \(x) sum(x, na.rm = TRUE))) %>%
+      tibble::column_to_rownames("Taxon")
+
+    feature_table_rel <- sweep(feature_table, 2, colSums(feature_table), "/")
+
+    if (!genus %in% rownames(feature_table_rel)) return(NULL)
+
+    genus_abund <- as.numeric(feature_table_rel[genus, ])
+    sample_names <- colnames(feature_table_rel)
+    meta <- as.data.frame(sample_data(ps_obj))[sample_names, , drop = FALSE]
+
+    df <- data.frame(
+      Sample = sample_names,
+      Abundance = genus_abund,
+      Group = as.factor(meta[[variable]])
+    )
+
+    ggplot(df, aes(x = Group, y = Abundance, fill = Group)) +
+      geom_boxplot(outlier.shape = NA) +
+      geom_jitter(width = 0.2, alpha = 0.6, color = "black") +
+      labs(
+        title = auto_title,
+        x = variable_name,
+        y = "Relative Abundance"
+      ) +
+      theme_minimal() +
+      theme(legend.position = "none")
+  }
+
+  plot_list <- lapply(sig_genera, plot_single)
+  names(plot_list) <- sig_genera
+  plot_list <- plot_list[!sapply(plot_list, is.null)]
+  message(sprintf("Created %d boxplots for significant genera.", length(plot_list)))
+  return(plot_list)
+}
+
+
+run_maaslin2_and_plot <- function(
+  ps_obj, 
+  variable, 
+  title_name = variable, 
+  taxlevel = "Genus",
+  qval_sig_max = 0.1,
+  min_prevalence = 0.05,
+  min_samples = 5,               # Minimum number of samples with abundance > 0
+  min_abundance_mean = 0.0005,    # Minimum mean relative abundance across all samples
+  min_abundance_max  = 0.001,     # Minimum *max* relative abundance in any sample
+  adjust_vars = c("Age", "sex"),
+  remove_unassigned = TRUE
+) {
+  
+ 
+
+  # Prepare feature table (taxa as rows, samples as columns)
+  otumat <- as.data.frame(otu_table(ps_obj))
+  if (!taxa_are_rows(ps_obj)) otumat <- t(otumat)
+  
+  # Aggregate at desired taxonomic level
+  taxmat <- as.data.frame(phyloseq::tax_table(ps_obj))
+  if (!(taxlevel %in% colnames(taxmat))) stop("taxlevel not in taxonomy table!")
+  
+  # Assign "Unassigned" to missing genus
+  otumat$Taxon <- taxmat[rownames(otumat), taxlevel]
+  otumat$Taxon[is.na(otumat$Taxon) | otumat$Taxon == "" ] <- "Unassigned"
+  
+  # Aggregate counts at genus level
+  feature_table <- otumat %>%
+    group_by(Taxon) %>%
+    summarise(across(where(is.numeric), \(x) sum(x, na.rm = TRUE))) %>%
+    tibble::column_to_rownames("Taxon")
+  
+  # Convert to relative abundance (to apply abundance filters)
+  feature_table_rel <- sweep(feature_table, 2, colSums(feature_table), "/")
+  
+  # Filtering step: prevalence, mean abundance, and max abundance
+  present_counts <- rowSums(feature_table_rel > 0)
+  mean_abund <- rowMeans(feature_table_rel)
+  max_abund <- apply(feature_table_rel, 1, max)
+  
+  keep_taxa <- (present_counts > (min_prevalence * ncol(feature_table_rel))) &
+               (present_counts >= min_samples) &
+               (mean_abund >= min_abundance_mean | max_abund >= min_abundance_max)
+  
+  feature_table <- feature_table[keep_taxa, ]
+  feature_table_rel <- feature_table_rel[keep_taxa, ]
+  
+  # Prepare metadata
+  meta <- as(phyloseq::sample_data(ps_obj), "data.frame")
+  meta <- meta[ , , drop = FALSE]
+  
+  # Match samples between metadata and feature table
+  common_samples <- intersect(colnames(feature_table), rownames(meta))
+  feature_table <- feature_table[ , common_samples, drop = FALSE]
+  meta <- meta[common_samples, , drop = FALSE]
+  
+  # Compose fixed effects
+  meta$Age <- as.numeric(as.character(meta$Age))
+  fixed_effects <- unique(c(variable, adjust_vars))
+  fixed_effects <- fixed_effects[fixed_effects %in% colnames(meta)]
+  
+  # Run MaAsLin2 
+  fit_data <- Maaslin2(
+    input_data = as.data.frame(t(feature_table)),
+    input_metadata = meta,
+    output = tempdir(),   
+    fixed_effects = fixed_effects,
+    normalization = "TSS",
+    min_prevalence = min_prevalence
+  )
+  
+  # Results
+  results <- fit_data$results
+  results_var <- results[results$metadata == variable, ]
+  results_var <- results_var %>%
+    dplyr::mutate(sig = ifelse(qval < qval_sig_max, "Significant", "NS"))
+  
+  # Only keep one result per genus
+  results_var_unique <- results_var %>%
+    group_by(feature) %>%
+    slice_min(order_by = qval, n = 1, with_ties = FALSE) %>%
+    ungroup()
+  
+  # Prevalence and abundance calculation (add to output)
+  prevalence_df <- data.frame(
+    feature = rownames(feature_table_rel),
+    prevalence = rowSums(feature_table_rel > 0),
+    prevalence_frac = rowSums(feature_table_rel > 0) / ncol(feature_table_rel),
+    mean_abund = rowMeans(feature_table_rel),
+    max_abund = apply(feature_table_rel, 1, max)
+  )
+  results_var_unique <- left_join(results_var_unique, prevalence_df, by = "feature")
+  
+  # Keep Only Genus Names That are in the Original Genus Column
+  genus_list <- unique(taxmat[[taxlevel]])
+  genus_list <- genus_list[!is.na(genus_list) & genus_list != ""]
+  if (remove_unassigned) {
+    genus_list <- genus_list[genus_list != "Unassigned"]
+  }
+  results_var_unique <- results_var_unique %>% filter(feature %in% genus_list)
+  
+  # Plot: Label rare significant genera
+  results_var_unique <- results_var_unique %>%
+    mutate(
+      label_flag = ifelse(
+        sig == "Significant" & prevalence < min_samples, 
+        paste0(feature, " (rare)"), 
+        ifelse(sig == "Significant", feature, "")
+      )
+    )
+  
+  p <- ggplot(results_var_unique, aes(x = coef, y = -log10(qval), color = sig)) +
+    geom_point() +
+    geom_text_repel(
+      aes(label = label_flag),
+      size = 3, 
+      max.overlaps = 12, 
+      color = "red",
+      force = 2,
+      box.padding = 0.5
+    ) +
+    scale_color_manual(values = c("Significant" = "red", "NS" = "black")) +
+    labs(
+      x = "Effect Size Coefficient",
+      y = "-log10(FDR)",
+      title = title_name
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  print(p)
+  n_rare_sig <- sum(results_var_unique$sig == "Significant" & results_var_unique$prevalence < min_samples)
+  if (n_rare_sig > 0) {
+    message(sprintf("Warning: %d significant genera are present in fewer than %d samples (labeled as (rare)). Interpret with caution!", n_rare_sig, min_samples))
+  }
+  return(list(plot = p, table = results_var_unique, all_results = results))
+}
+
+plot_all_significant_boxplots <- function(
+  ps_obj, 
+  maaslin2_table, 
+  variable = "FoodSecure_vs_FoodInsecure", 
+  variable_name = variable,
+  taxlevel = "Genus"
+) {
+  
+  sig_genera <- maaslin2_table %>%
+    filter(sig == "Significant", metadata == variable) %>%
+    pull(feature) %>%
+    unique()
+  
+  # Helper function for a single genus
+  plot_single <- function(genus) {
+    qval <- maaslin2_table %>%
+      filter(feature == genus, metadata == variable) %>%
+      arrange(qval) %>%
+      slice(1) %>%
+      pull(qval)
+    qval_label <- if(length(qval) == 0) "NA" else formatC(qval, digits = 3, format = "f")
+    auto_title <- paste0(genus, " (q = ", qval_label, ")")
+    
+    otumat <- as.data.frame(otu_table(ps_obj))
+    if (!taxa_are_rows(ps_obj)) otumat <- t(otumat)
+    taxmat <- as.data.frame(phyloseq::tax_table(ps_obj))
+    otumat$Taxon <- taxmat[rownames(otumat), taxlevel]
+    feature_table <- otumat %>%
+      group_by(Taxon) %>%
+      summarise(across(where(is.numeric), \(x) sum(x, na.rm = TRUE))) %>%
+      tibble::column_to_rownames("Taxon")
+    feature_table_rel <- sweep(feature_table, 2, colSums(feature_table), "/")
+    if (!genus %in% rownames(feature_table_rel)) return(NULL)
+    genus_abund <- as.numeric(feature_table_rel[genus, ])
+    sample_names <- colnames(feature_table_rel)
+    meta <- as(phyloseq::sample_data(ps_obj), "data.frame")
+    meta <- meta[sample_names, , drop = FALSE]
+    df <- data.frame(
+      Sample = sample_names,
+      Abundance = genus_abund,
+      Group = as.factor(meta[[variable]])
+    )
+    ggplot(df, aes(x = Group, y = Abundance, fill = Group)) +
+      geom_boxplot(outlier.shape = NA) +
+      geom_jitter(width = 0.2, alpha = 0.6, color = "black") +
+      labs(
+        title = auto_title,
+        x = variable_name,
+        y = "Relative Abundance"
+      ) +
+      theme_minimal() +
+      theme(legend.position = "none")
+  }
+  
+  # Loop and collect
+  plot_list <- lapply(sig_genera, plot_single)
+  names(plot_list) <- sig_genera
+  plot_list <- plot_list[!sapply(plot_list, is.null)]  # Remove any nulls
+  print(paste("Created", length(plot_list), "boxplots for significant genera."))
+  plot_list
+}
+
+#for (var in variables1){
+  #var_maaslin2 <- run_maaslin2_and_plot(ps_gutMicro, var, qval_sig_max = 0.2) 
+  #var_boxplots <- plot_all_significant_boxplots(
+    #ps_obj = ps_gutMicro,
+    #maaslin2_table = var_maaslin2$table,
+    #variable = var)
+  #print(var_boxplots[[1]])
+#}
+
+for (var in variables1){
+  create_volcano_plot(ps_gutMicro, "Genus", var)
+  #print(var_boxplots[[1]])
+}
+
+#Run ALDEx2 plot and get the result table
+volcano_out <- create_volcano_plot(ps_gutMicro, taxlevel = "Genus", condition_col = "EH_GL_C")
+aldex2_table <- volcano_out$table
+
+ #Generate boxplots for significant genera
+aldex_boxplots <- plot_aldex2_boxplots(
+  ps_obj = ps_gutMicro,
+  aldex2_table = aldex2_table,
+  variable = "EH_GL_C"
+)
+
+# View one plot
+print(aldex_boxplots[[2]])
+
+ggsave("EH_GL1.png", plot = aldex_boxplots[[1]], width = 6, height = 4, dpi = 500)
+
+
+ggsave("EH_GL_C1.png", plot = aldex_boxplots[[1]], width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_C2.png", plot = aldex_boxplots[[2]], width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_C3.png", plot = aldex_boxplots[[3]], width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_C4.png", plot = aldex_boxplots[[4]], width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_C5.png", plot = aldex_boxplots[[5]], width = 6, height = 4, dpi = 500)
+
+
+ggsave("EH_GL_C_volcano.png", plot = volcano_out$plot, width = 6, height = 4, dpi = 500)
+ggsave("EH_GLvolcano.png", plot = volcano_out$plot, width = 6, height = 4, dpi = 500)
+ggsave("EH_volcano.png", plot = volcano_out$plot, width = 6, height = 4, dpi = 500)
+ggsave("GL_volcano.png", plot = volcano_out$plot, width = 6, height = 4, dpi = 500)
+ggsave("C_volcano.png", plot = volcano_out$plot, width = 6, height = 4, dpi = 500)
+ggsave("EH_Cvolcano.png", plot = volcano_out$plot, width = 6, height = 4, dpi = 500)
+ggsave("GL_Cvolcano.png", plot = volcano_out$plot, width = 6, height = 4, dpi = 500)
+ggsave("ANYvolcano.png", plot = volcano_out$plot, width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_Cvolcano.png", plot = volcano_out$plot, width = 6, height = 4, dpi = 500)
+```
+
+## ML Model Training 
+```{r ML training}
+cv_predict_clr_xgb <- function(
+  ps_obj,
+  outcome_var,
+  meta_cols = NULL,
+  min_prevalence = 0.05,
+  nfolds = 10,
+  seed = 100,
+  n_cores = 4
+) {
+  library(parallel)
+  library(doParallel)
+  library(phyloseq)
+
+  set.seed(seed)
+  cl <- parallel::makeCluster(n_cores)  # <- fix here
+  registerDoParallel(cl)
+
+  get_tax_matrix <- function(ps, taxlevel, prefix) {
+    taxlevel <- as.character(taxlevel)  # <- ensures it's not a list
+  
+    ps_tax <- tax_glom(ps, taxlevel)
+    otumat <- as.data.frame(otu_table(ps_tax))
+    if (!taxa_are_rows(ps_tax)) otumat <- t(otumat)
+  
+    taxmat <- as.data.frame(phyloseq::tax_table(ps_tax))
+  
+    if (!(taxlevel %in% colnames(taxmat))) {
+      stop(paste("Taxlevel", taxlevel, "not found in tax_table columns."))
+    }
+  
+    tax_names <- as.character(taxmat[[taxlevel]])
+    tax_names[is.na(tax_names) | tax_names == ""] <- "Unassigned"
+    rownames(otumat) <- paste0(prefix, make.unique(tax_names))
+  
+    present_counts <- rowSums(otumat > 0)
+    keep <- present_counts >= (min_prevalence * ncol(otumat))
+    otumat <- otumat[keep, , drop = FALSE]
+  
+    return(otumat)
+  }
+
+
+  fam_tab <- get_tax_matrix(ps_obj, "Family", "F__")
+  gen_tab <- get_tax_matrix(ps_obj, "Genus", "G__")
+  all_feat_tab <- rbind(fam_tab, gen_tab)
+  all_feat_tab[all_feat_tab == 0] <- 1e-6
+  clr_mat <- compositions::clr(all_feat_tab)
+  clr_mat <- t(clr_mat)
+
+  meta <- as.data.frame(phyloseq::sample_data(ps_obj))
+  clr_samples <- rownames(clr_mat)
+  meta <- meta[clr_samples, , drop = FALSE]
+  y <- as.factor(meta[[outcome_var]])
+  keep <- !is.na(y)
+  clr_mat <- clr_mat[keep, , drop = FALSE]
+  meta <- meta[keep, , drop = FALSE]
+  y <- y[keep]
+  levels(y) <- make.names(levels(y))
+
+  if (length(meta_cols) > 0 && any(meta_cols %in% colnames(meta))) {
+    meta_cols <- intersect(meta_cols, colnames(meta))
+    meta_features <- meta[, meta_cols, drop = FALSE]
+    meta_features[] <- lapply(meta_features, function(x) as.numeric(as.character(x)))
+    meta_features <- meta_features[, sapply(meta_features, function(x) all(x %in% c(0, 1, NA))), drop = FALSE]
+    X_full <- cbind(clr_mat, meta_features)
+  } else {
+    X_full <- clr_mat
+    meta_cols <- character(0)  # ensure later steps don't break
+  }
+
+  
+  nzv <- caret::nearZeroVar(X_full)
+  if (length(nzv) > 0) X_full <- X_full[, -nzv, drop = FALSE]
+
+  # hyperparameter grid
+  xgb_grid <- expand.grid(
+    nrounds = c(100, 200),
+    max_depth = c(3, 5, 7),
+    eta = c(0.05, 0.1),
+    gamma = 0,
+    colsample_bytree = 0.8,
+    min_child_weight = 1,
+    subsample = 0.8
+  )
+
+  fitControl <- caret::trainControl(
+    method = "cv",
+    number = nfolds,
+    classProbs = TRUE,
+    savePredictions = "final",
+    allowParallel = TRUE
+  )
+
+  xgb_fit <- caret::train(
+    x = X_full,
+    y = y,
+    method = "xgbTree",
+    tuneGrid = xgb_grid,
+    trControl = fitControl,
+    verbose = FALSE
+  )
+
+  overall_acc <- max(xgb_fit$results$Accuracy)
+  best_params <- xgb_fit$bestTune
+
+  varimp <- caret::varImp(xgb_fit, scale = FALSE)$importance
+  varimp_df <- tibble(Feature = rownames(varimp), Importance = varimp[,1]) %>%
+    arrange(desc(Importance)) %>%
+    mutate(Level = dplyr::case_when(
+      grepl("^F__", Feature) ~ "Family",
+      grepl("^G__", Feature) ~ "Genus",
+      Feature %in% meta_cols ~ "Metadata",
+      TRUE ~ "Other"
+    ))
+
+  preds <- xgb_fit$pred$pred[order(xgb_fit$pred$rowIndex)]
+  y_true <- xgb_fit$pred$obs[order(xgb_fit$pred$rowIndex)]
+  overall_cm <- caret::confusionMatrix(preds, y_true)
+
+  stopCluster(cl)
+  registerDoSEQ()
+
+  return(list(
+    overall_accuracy = overall_acc,
+    best_params = best_params,
+    confusion_matrix = overall_cm,
+    feature_importance = varimp_df,
+    predictions = preds,
+    y_true = y_true,
+    xgb_fit = xgb_fit
+  ))
+}
+
+# E.g.
+results_xgb <- cv_predict_clr_xgb(ps_gutMicro, "GL")
+results_xgb$confusion_matrix
+head(results_xgb$feature_importance, 50)
+
+```
+
+## Linear Discriminant analysis w/ Lefse
+```{r diff Lefse}
+create_lefse_barplot <- function(ps, factor, title_name = factor, lda_cut = 3, wil_cut = 0.01, kw_cut = 0.01) {
+  # Extract sample data
+  sample_df <- data.frame(sample_data(ps))
+
+  # Get the variable of interest
+  var_vector <- sample_df[[factor]]
+
+  # Exclude NAs
+  var_vector_no_na <- var_vector[!is.na(var_vector)]
+
+  keep_samples <- rownames(sample_df)[!is.na(var_vector)]
+  ps_subset <- prune_samples(keep_samples, ps)
+  
+  # Run LEfSe
+  mm_lefse <- tryCatch(
+    run_lefse(
+      ps_subset,
+      group = factor,
+      wilcoxon_cutoff = wil_cut,
+      kw_cutoff = kw_cut,
+      lda_cutoff = lda_cut,
+      multigrp_strat = TRUE
+    ),
+    error = function(e) {
+      message(paste("LefSe failed for", factor, ":", e$message))
+      return(NULL)
+    }
+  )
+
+  # Remove species-level features (those containing 's__')
+  if (!is.null(mm_lefse)) {
+    mm_lefse@marker_table <- mm_lefse@marker_table[!grepl("s__", mm_lefse@marker_table$feature), ]
+  }
+
+  # Plot or fallback
+  if (!is.null(mm_lefse) && nrow(mm_lefse@marker_table) > 0) {
+    lefse_bar_plot <- tryCatch(
+      plot_ef_bar(mm_lefse) +
+        ggtitle(title_name),
+      error = function(e) {
+        message(paste("Failed to create LefSe bar plot:", e$message))
+        ggplot() + annotate("text", x = 1, y = 1, label = "LefSe plot failed", size = 6) + theme_void()
+      }
+    )
+  } else {
+    lefse_bar_plot <- ggplot() +
+      annotate("text", x = 1, y = 1, label = "No significant non-species features", size = 6) +
+      theme_void()
+  }
+
+  print(lefse_bar_plot)
+  return(lefse_bar_plot)
+}
+
+
+EH_lefse<- create_lefse_barplot(ps_gutMicro, "EH", "EH", lda_cut = 2, wil_cut = 0.05, kw_cut = 0.05)
+GL_lefse<- create_lefse_barplot(ps_gutMicro, "GL", "GL", lda_cut = 2, wil_cut = 0.05, kw_cut = 0.05)
+C_lefse<- create_lefse_barplot(ps_gutMicro, "C", "C", lda_cut = 2, wil_cut = 0.03, kw_cut = 0.03)
+ANY_lefse<- create_lefse_barplot(ps_gutMicro, "ANY", "ANY", lda_cut = 2, wil_cut = 0.05, kw_cut = 0.05)
+EH_GL_lefse<- create_lefse_barplot(ps_gutMicro, "EH_GL", "EH_GL", lda_cut = 2, wil_cut = 0.05, kw_cut = 0.05)
+EH_C_lefse<- create_lefse_barplot(ps_gutMicro, "EH_C", "EH_C", lda_cut = 2, wil_cut = 0.1, kw_cut = 0.1)
+GL_C_lefse<- create_lefse_barplot(ps_gutMicro, "GL_C", "GL_C", lda_cut = 4, wil_cut = 0.05, kw_cut = 0.05)
+EH_GL_C_lefse<- create_lefse_barplot(ps_gutMicro, "EH_GL_C", "EH_GL_C", lda_cut = 2, wil_cut = 0.05, kw_cut = 0.05)
+
+
+
+ggsave("EH_lefse.png", plot = EH_lefse, width = 6, height = 4, dpi = 500)
+ggsave("GL_lefse.png", plot = GL_lefse, width = 6, height = 4, dpi = 500)
+ggsave("C_lefse.png", plot = C_lefse, width = 6, height = 4, dpi = 500)
+ggsave("ANY_lefse.png", plot = ANY_lefse, width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_lefse.png", plot = EH_GL_lefse, width = 6, height = 4, dpi = 500)
+ggsave("EH_C_lefse.png", plot = EH_C_lefse, width = 6, height = 4, dpi = 500)
+ggsave("GL_C_lefse.png", plot = GL_C_lefse, width = 6, height = 4, dpi = 500)
+ggsave("EH_GL_C_lefse.png", plot = EH_GL_C_lefse, width = 6, height = 4, dpi = 500)
+
+
+```
+
+
+## ROC, Variable Importance, and Heatmap plots
+```{r ml plots}
+
+plot_roc_curve_gg <- function(model_results, positive_class = NULL) {
+  
+  y_true <- model_results$y_true
+  if (is.null(positive_class)) {
+    positive_class <- levels(y_true)[1]
+  }
+  pred_prob <- model_results$xgb_fit$pred %>%
+    filter(obs %in% levels(y_true)) %>%
+    arrange(rowIndex) %>%
+    pull(!!as.name(positive_class))
+  
+  roc_obj <- roc(y_true, pred_prob, levels = rev(levels(y_true)), direction = "<")
+  auc_value <- auc(roc_obj)
+  
+  ggroc(roc_obj, legacy.axes = TRUE, colour = "darkgreen", size = 1.3) +
+    geom_abline(linetype = "dashed", color = "gray50") +
+    labs(
+      title = sprintf("ROC Curve (AUC = %.2f)", auc_value),
+      x = "False Positive Rate (1 - Specificity)",
+      y = "True Positive Rate (Sensitivity)"
+    ) +
+    theme_minimal(base_size = 14)
+}
+
+plot_top_importance <- function(model_results, n_top = 10, bar_color = "#2c7bb6") {
+  
+  varimp <- model_results$feature_importance %>% 
+    arrange(desc(Importance)) %>%
+    head(n_top)
+  
+  ggplot(varimp, aes(x = reorder(Feature, Importance), y = Importance)) +
+    geom_bar(stat = "identity", fill = bar_color) +
+    coord_flip() +
+    labs(
+      title = paste("Top", n_top, "Feature Importance"),
+      x = "",
+      y = "Importance"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "none")
+}
+
+plot_top_feature_heatmap_clr <- function(
+  ps_obj,
+  model_results,
+  n_top = 10,
+  metadata_vars = NULL,
+  outcome_var = "FoodSecure_vs_FoodInsecure",
+  min_prevalence = 0.05
+) {
+  
+  # Top N features
+  top_features <- head(model_results$feature_importance$Feature, n_top)
+  
+  # Genus & family tables
+  get_tax_matrix <- function(ps, taxlevel, prefix) {
+    ps_tax <- tax_glom(ps, taxlevel)
+    otumat <- as.data.frame(otu_table(ps_tax))
+    if (!taxa_are_rows(ps_tax)) otumat <- t(otumat)
+    taxmat <- as.data.frame(phyloseq::tax_table(ps_tax))
+    tax_names <- as.character(taxmat[[taxlevel]])
+    tax_names[is.na(tax_names) | tax_names == ""] <- "Unassigned"
+    rownames(otumat) <- paste0(prefix, make.unique(tax_names))
+    present_counts <- rowSums(otumat > 0)
+    keep <- present_counts >= (min_prevalence * ncol(otumat))
+    otumat <- otumat[keep, , drop=FALSE]
+    return(otumat)
+  }
+  
+  fam_tab <- get_tax_matrix(ps_obj, "Family", "F__")
+  gen_tab <- get_tax_matrix(ps_obj, "Genus", "G__")
+  all_feat_tab <- rbind(fam_tab, gen_tab)
+  
+  # CLR transformation
+  all_feat_tab[all_feat_tab == 0] <- 1e-6
+  clr_mat <- compositions::clr(all_feat_tab)
+  clr_mat <- t(clr_mat)  # samples as rows, features as columns
+  
+  # Metadata (as numeric)
+  meta <- as.data.frame(phyloseq::sample_data(ps_obj))
+  clr_samples <- rownames(clr_mat)
+  meta <- meta[clr_samples, , drop = FALSE]
+
+  # Handling NaN
+  if (!is.null(metadata_vars) && length(metadata_vars) > 0) {
+    metadata_vars <- intersect(metadata_vars, colnames(meta))
+    metadata_features <- meta[, metadata_vars, drop = FALSE]
+    metadata_features[] <- lapply(metadata_features, function(x) as.numeric(as.character(x)))
+    X_full <- cbind(clr_mat, metadata_features)
+  } else {
+    X_full <- clr_mat  # Just CLR matrix, no metadata
+  }
+
+  # Ensure all columns are numeric
+  for (i in seq_len(ncol(X_full))) {
+    if (!is.numeric(X_full[, i])) {
+      X_full[, i] <- as.numeric(as.character(X_full[, i]))
+    }
+  }
+  
+  # Subset to top features, as rows (order preserved)
+  top_feats_present <- top_features[top_features %in% colnames(X_full)]
+  if (length(top_feats_present) == 0) stop("No top features found in input matrix.")
+  heatmap_mat <- t(X_full[, top_feats_present, drop = FALSE])
+  
+  # Remove rows (features) that are all NA or all zero
+  keep_rows <- apply(heatmap_mat, 1, function(x) any(!is.na(x)) && any(x != 0))
+  heatmap_mat <- heatmap_mat[keep_rows, , drop = FALSE]
+  if (nrow(heatmap_mat) == 0) stop("No valid features to plot after removing all-NA/zero rows.")
+  
+  # Annotation for sample outcome
+  sample_anno <- as(phyloseq::sample_data(ps_obj), "data.frame")[, outcome_var, drop = FALSE]
+  sample_anno <- sample_anno[colnames(heatmap_mat), , drop = FALSE]
+  sample_anno[[outcome_var]] <- as.factor(as.character(sample_anno[[outcome_var]]))
+  rownames(sample_anno) <- colnames(heatmap_mat)
+  
+  # Order columns by group
+  group_order <- order(sample_anno[[outcome_var]])
+  heatmap_mat <- heatmap_mat[, group_order, drop = FALSE]
+  sample_anno <- sample_anno[group_order, , drop = FALSE]
+  
+  # Z-score (standardize) each feature (row)
+  heatmap_mat_scaled <- t(scale(t(heatmap_mat)))
+  heatmap_mat_scaled[is.na(heatmap_mat_scaled)] <- 0
+  
+  # Plot heatmap (no clustering of samples)
+  png("top_features_heatmap.png", width = 5000, height = 1800, res = 500)
+  pheatmap::pheatmap(
+    mat = heatmap_mat_scaled,
+    annotation_col = sample_anno,
+    main = paste("Top", n_top, "Features Heatmap"),
+    clustering_method = "complete",
+    cluster_cols = FALSE,
+    cluster_rows = TRUE,
+    fontsize_row = 10,
+    fontsize_col = 7,
+    scale = "none",
+    color = colorRampPalette(c("navy", "white", "firebrick3"))(100)
+  )
+  dev.off()
+}
+
+
+# E.g.
+plot_top_feature_heatmap_clr(
+  ps_obj = ps_gutMicro,
+  model_results = results_xgb,
+  n_top = 10,
+  metadata_vars = NULL,
+  outcome_var = "GL",
+  min_prevalence = 0.05
+)
+
+
+
+
+library(pROC)
+library(ggplot2)
+plot_roc_curve_gg(results_xgb)
+plot_top_importance(results_xgb, n_top = 10) 
+
+
+roc_plot <- plot_roc_curve_gg(results_xgb)
+ggsave("roc_curve.png", plot = roc_plot, width = 6, height = 4, dpi = 500)
+
+# Generate feature importance plot
+imp_plot <- plot_top_importance(results_xgb, n_top = 10)
+
+# Save feature importance plot
+ggsave("feature_importance.png", plot = imp_plot, width = 6, height = 5, dpi = 300)
+
+```
+
+
+
